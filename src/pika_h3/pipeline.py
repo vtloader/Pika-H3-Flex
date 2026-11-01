@@ -121,6 +121,23 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def input_digests(args):
+    """SHA-256 of every generation input, captured once before the models load.
+
+    The metadata block used to call ``file_sha256`` on the input paths after the
+    whole run finished. A generation takes tens of minutes, so an input that was
+    replaced or removed in the meantime made a *completed* run fail while writing
+    its JSON: the validated MP4 was already on disk, but no ``output.json`` and no
+    ``done`` marker were produced. Snapshot the digests up front instead, which
+    also fails fast (before any model is loaded) when an input is missing.
+    """
+    return {
+        "first_image": file_sha256(args.first_image) if args.first_image else None,
+        "last_image": file_sha256(args.last_image) if args.last_image else None,
+        "references": [file_sha256(spec.partition(":")[2]) for spec in args.ref],
+    }
+
+
 def resolve_assets(args):
     from huggingface_hub import snapshot_download
     task = "ref2va" if args.task == "ref2va" else "fl2va"
@@ -203,6 +220,10 @@ def generate(args):
     _progress("prepare", 2, task=args.task, canvas=f"{width}x{height}", frames=frames)
     from .core.media import preflight_reference_specs
     _progress("loading", 5, what="references")
+    # Snapshot the input digests before anything is decoded, and long before the
+    # models run: a path that disappears or is replaced during a 30-minute
+    # generation must not fail the JSON write of a finished run (see input_digests).
+    digests = input_digests(args)
     preflight_reference_specs(args.ref)
     references = [Reference.from_spec(spec) for spec in args.ref]
     counts = {kind: sum(r.kind == kind for r in references) for kind in ("image", "video", "audio")}
@@ -374,11 +395,9 @@ def generate(args):
         "reference_order": [r.kind for r in references]}
     import importlib.metadata
     metadata["dependencies"] = {name: importlib.metadata.version(name) for name in ("diffusers", "transformers", "peft", "av", "safetensors")}
-    metadata["input_sha256"] = {
-        "first_image": file_sha256(args.first_image) if args.first_image else None,
-        "last_image": file_sha256(args.last_image) if args.last_image else None,
-        "references": [file_sha256(spec.partition(":")[2]) for spec in args.ref],
-    }
+    # Digest computed before the models loaded: the input files may already be gone
+    # (or replaced) by now, which must not fail a finished generation.
+    metadata["input_sha256"] = digests
     args.output.with_suffix(".json").write_text(json.dumps(metadata,indent=2)+"\n")
     _progress("done", 100, output=str(args.output))
     print(f"Saved {args.output}", flush=True)

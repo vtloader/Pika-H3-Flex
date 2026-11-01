@@ -423,6 +423,38 @@ class CanvasCliTests(unittest.TestCase):
         geom = resolve_geometry(request)
         self.assertEqual((geom.width, geom.height), (1024, 576))
 
+    def test_input_digests_survive_input_removal(self) -> None:
+        """Metadata SHA-256 is snapshotted before the run, not re-read afterwards.
+
+        A run whose first image is removed while the models work (the 95 %-then-
+        FileNotFoundError failure) must still keep the digest of the bytes it
+        actually consumed; hashing after the fact raised and lost the JSON.
+        """
+        from pika_h3.cli import parser
+        import pika_h3.pipeline as pipeline
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / "first.png"
+            image.write_bytes(PNG_1PX)
+            args = parser().parse_args([
+                "--task", "i2va", "--prompt", "x", "--canvas", "1024x576", "--duration", "5",
+                "--first-image", str(image), "--output", str(Path(tmp) / "out.mp4"),
+                "--revision", "0" * 40,
+            ])
+            digests = pipeline.input_digests(args)
+            expected = __import__("hashlib").sha256(PNG_1PX).hexdigest()
+            self.assertEqual(digests["first_image"], expected)
+            self.assertIsNone(digests["last_image"])
+            self.assertEqual(digests["references"], [])
+            # The snapshot is complete: this is exactly why the old late hash raised.
+            image.unlink()
+            with self.assertRaises(FileNotFoundError):
+                pipeline.file_sha256(image)
+            self.assertEqual(digests["first_image"], expected)
+        source = Path(pipeline.__file__).read_text(encoding="utf-8")
+        self.assertIn('metadata["input_sha256"] = digests', source)
+        self.assertEqual(source.count("file_sha256(args.first_image)"), 1)
+
 
 class StaticChecks(unittest.TestCase):
     def test_no_eval_or_exec_in_js(self) -> None:
