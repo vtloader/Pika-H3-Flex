@@ -2,8 +2,15 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
+.venv311/
+.venv312/
 .env
 outputs/
 *.safetensors
 build/
 dist/
+webui/runs/
+
+# local weight caches and launch logs
+models/
+nohup.out

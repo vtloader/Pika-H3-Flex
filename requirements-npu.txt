@@ -1,0 +1,22 @@
+# NPU (Ascend) 环境
+#
+# torch / torch_npu / torchvision 不在此文件中：
+# 它们必须从 PyTorch 官方 CPU 源安装，见 README-npu.md，
+# 否则 PyPI 的 CUDA 版 torch 会与 torch_npu 冲突。
+#   torch==2.14.0+cpu        (https://download.pytorch.org/whl/cpu)
+#   torch_npu==2.14.0
+#   torchvision==0.29.2+cpu  (https://download.pytorch.org/whl/cpu)
+#
+# 安装：
+#   python -m pip install -r requirements-npu.txt
+--extra-index-url https://mirrors.cloud.tencent.com/pypi/simple
+transformers==5.15.0
+peft==0.20.0
+av==18.1.0
+numpy==2.5.2
+pillow==12.3.0
+pyyaml==6.0.3
+safetensors==0.8.0
+huggingface-hub==1.30.0
+accelerate==1.14.0
+# diffusers 从固定上游提交安装，见 README-npu.md

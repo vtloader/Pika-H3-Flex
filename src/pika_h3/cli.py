@@ -2,7 +2,35 @@
 # Copyright © 2026 Mellis, Inc.
 """Public generation command; validate inputs before loading models."""
 import argparse
+import re
 from pathlib import Path
+
+CANVAS_MULTIPLE = 32
+MIN_ASPECT_RATIO = 0.25
+MAX_ASPECT_RATIO = 4.0
+MAX_CANVAS_SIDE = 8192
+
+
+def canvas_size(value):
+    """Parse ``WIDTHxHEIGHT`` on the 32-pixel VAE lattice."""
+    match = re.fullmatch(r"\s*(\d+)\s*[xX]\s*(\d+)\s*", value or "")
+    if not match:
+        raise argparse.ArgumentTypeError("canvas must be WIDTHxHEIGHT, for example 1024x576")
+    width, height = int(match.group(1)), int(match.group(2))
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError("canvas sides must be positive")
+    if width % CANVAS_MULTIPLE or height % CANVAS_MULTIPLE:
+        raise argparse.ArgumentTypeError(
+            f"canvas sides must be multiples of {CANVAS_MULTIPLE}, got {width}x{height}")
+    if width > MAX_CANVAS_SIDE or height > MAX_CANVAS_SIDE:
+        raise argparse.ArgumentTypeError(
+            f"canvas sides must be at most {MAX_CANVAS_SIDE}, got {width}x{height}")
+    ratio = width / height
+    if not MIN_ASPECT_RATIO <= ratio <= MAX_ASPECT_RATIO:
+        raise argparse.ArgumentTypeError(
+            f"canvas aspect ratio must be within [{MIN_ASPECT_RATIO:g}, {MAX_ASPECT_RATIO:g}], "
+            f"got {width}x{height} ({ratio:.3f})")
+    return width, height
 
 
 def parser():
@@ -16,9 +44,15 @@ def parser():
     p.add_argument("--ref", action="append", default=[], help="Ordered image:path, video:path or audio:path reference")
     p.add_argument("--resolution", choices=["480p", "768p"], default="768p")
     p.add_argument("--aspect", choices=["21:9","16:9","3:2","4:3","5:4","1:1","4:5","3:4","2:3","9:16","9:21"], default="16:9")
+    p.add_argument("--canvas", type=canvas_size, metavar="WIDTHxHEIGHT",
+                   help="Explicit output canvas on the 32-px lattice (e.g. 1312x736); "
+                        "bypasses the --resolution/--aspect bucket table. --resolution/--aspect "
+                        "remain the default path when this is omitted.")
     p.add_argument("--duration", type=int, choices=range(5,16), default=5)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--cpu-offload", action="store_true", help="Offload transformer blocks to CPU between forwards to reduce VRAM; slower and requires host RAM")
+    p.add_argument("--low-vram", action="store_true", help="Also stream the text encoder and both VAEs from CPU host memory; required when a component alone exceeds device memory (implied by --cpu-offload)")
+    p.add_argument("--tensor-parallel", type=int, choices=[1, 2], default=1, help="Shard the transformer across N ranks with HCCL weight tensor parallelism (launch with torchrun --nproc_per_node=N)")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--model-repo", default="Pika-Labs/Pika-H3-Flex")
     p.add_argument("--revision", required=True, help="Immutable HF adapter repository commit")

@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pika H3 Flex · 视频与音频生成</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">PIKA H3 FLEX · ASCEND NPU</p>
+        <h1>视频与音频生成</h1>
+        <p class="lede">输入提示词与目标像素量，画布、帧数与时长由服务端按模型网格自动计算。</p>
+      </div>
+      <div id="device-panel" class="device-panel" aria-live="polite">
+        <span class="device-title">设备状态</span>
+        <span id="device-text" class="muted">正在读取 NPU 状态…</span>
+        <div id="device-bars" class="device-bars"></div>
+      </div>
+    </header>
+
+    <form id="task-form" class="card" novalidate>
+      <div class="form-layout">
+        <div class="prompt-field">
+          <label for="prompt">提示词</label>
+          <textarea id="prompt" name="prompt" rows="12" maxlength="8000" required
+            placeholder="描述画面、主体、动作、镜头与声音。参考素材用 &lt;Picture 1&gt;、&lt;Video 1&gt;、&lt;Audio 1&gt; 指代。"></textarea>
+          <small id="prompt-meter" class="muted">0 / 8000 字符</small>
+          <div class="prompt-actions">
+            <button type="button" id="load-example" class="secondary-button">载入示例提示词</button>
+          </div>
+        </div>
+
+        <div class="field-stack">
+          <div>
+            <span class="label">生成模式</span>
+            <div class="mode-cards" id="mode-cards" role="radiogroup" aria-label="生成模式">
+              <button type="button" class="mode-card" data-mode="text" role="radio" aria-checked="true">
+                <strong>文本</strong><small>t2va · 仅提示词</small>
+              </button>
+              <button type="button" class="mode-card" data-mode="keyframes" role="radio" aria-checked="false">
+                <strong>关键帧</strong><small>i2va / l2va · 首帧或尾帧</small>
+              </button>
+              <button type="button" class="mode-card" data-mode="firstlast" role="radio" aria-checked="false">
+                <strong>首尾帧</strong><small>fl2va · 首帧 + 尾帧</small>
+              </button>
+              <button type="button" class="mode-card" data-mode="references" role="radio" aria-checked="false">
+                <strong>多模态参考</strong><small>ref2va · 图 / 视频 / 音频</small>
+              </button>
+            </div>
+            <p id="mode-hint" class="muted mode-hint"></p>
+          </div>
+
+          <section id="keyframe-fields" class="upload-section hidden" aria-live="polite">
+            <div class="field-grid">
+              <div>
+                <label for="first">首帧图片 <span class="muted">（单张，可替换）</span></label>
+                <input id="first" name="first" type="file" accept="image/png,image/jpeg,image/webp,image/bmp">
+                <div id="first-preview" class="upload-previews"></div>
+              </div>
+              <div>
+                <label for="last">尾帧图片 <span class="muted">（单张，可替换）</span></label>
+                <input id="last" name="last" type="file" accept="image/png,image/jpeg,image/webp,image/bmp">
+                <div id="last-preview" class="upload-previews"></div>
+              </div>
+            </div>
+            <small>关键帧会自动居中裁剪到目标画布；只放首帧对应 i2va，只放尾帧对应 l2va，两者都放对应 fl2va。</small>
+          </section>
+
+          <section id="reference-fields" class="upload-section hidden" aria-live="polite">
+            <div class="ref-toolbar">
+              <span class="ref-counts" id="ref-counts">图片 0/9 · 视频 0/3 · 音频 0/3 · 合计 0/12</span>
+              <span class="ref-toolbar-actions">
+                <button type="button" class="secondary-button" id="clear-refs">清除图片</button>
+                <button type="button" class="secondary-button" id="clear-video_refs">清除视频</button>
+                <button type="button" class="secondary-button" id="clear-audio_refs">清除音频</button>
+              </span>
+            </div>
+            <div class="upload-field">
+              <label for="refs">参考图片 <span class="muted">（≤9，顺序对应 &lt;Picture n&gt;）</span></label>
+              <input id="refs" name="refs" type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp">
+              <div id="refs-preview" class="upload-previews"></div>
+            </div>
+            <div class="upload-field">
+              <label for="video_refs">参考视频 <span class="muted">（≤3，2–15s，合计 ≤15s，顺序对应 &lt;Video n&gt;）</span></label>
+              <input id="video_refs" name="video_refs" type="file" multiple accept="video/mp4,video/quicktime,video/webm,video/x-matroska">
+              <div id="video_refs-preview" class="upload-previews"></div>
+            </div>
+            <div class="upload-field">
+              <label for="audio_refs">参考音频 <span class="muted">（≤3，2–15s，合计 ≤15s，顺序对应 &lt;Audio n&gt;）</span></label>
+              <input id="audio_refs" name="audio_refs" type="file" multiple accept="audio/wav,audio/mpeg,audio/mp4,audio/aac,audio/flac,audio/ogg,audio/opus">
+              <div id="audio_refs-preview" class="upload-previews"></div>
+            </div>
+            <small id="ref-hint" class="muted"></small>
+          </section>
+        </div>
+      </div>
+
+      <section class="config-panel" aria-labelledby="config-heading">
+        <h2 id="config-heading">画布与时长</h2>
+        <div class="segmented" id="canvas-mode" role="tablist" aria-label="画布计算方式">
+          <button type="button" role="tab" data-canvas-mode="mp" aria-selected="true">按像素量（MP）自动</button>
+          <button type="button" role="tab" data-canvas-mode="preset" aria-selected="false">预设分辨率</button>
+        </div>
+
+        <div id="mp-panel" class="config-grid">
+          <div>
+            <label for="mp">目标像素量（MP）</label>
+            <input id="mp" name="mp" type="number" min="0.05" max="8" step="0.05" value="1.0" inputmode="decimal">
+            <small>例如 0.4（480p 级）、1.0、1.5；画布会吸附到 32 px 网格。</small>
+          </div>
+          <div>
+            <label for="mp-duration">时长（秒）</label>
+            <select id="mp-duration" name="mp_duration">
+              <option value="5">5 秒</option>
+              <option value="6">6 秒</option>
+              <option value="7">7 秒</option>
+              <option value="8">8 秒</option>
+              <option value="9">9 秒</option>
+              <option value="10" selected>10 秒</option>
+              <option value="11">11 秒</option>
+              <option value="12">12 秒</option>
+              <option value="13">13 秒</option>
+              <option value="14">14 秒</option>
+              <option value="15">15 秒</option>
+            </select>
+            <small>时长由你决定；帧数按 17n+5 网格向上取整。</small>
+          </div>
+        </div>
+
+        <details id="budget-panel" class="config-details">
+          <summary>高级：计算预算（可选）</summary>
+          <div class="config-grid">
+            <div>
+              <label for="budget">计算预算（MP·帧）</label>
+              <input id="budget" name="budget" type="number" min="20" max="4000" step="10" value="2000" inputmode="decimal">
+              <small>画布面积 × 帧数 的上限，仅用于提示。超出时给出警告，不阻止提交。</small>
+            </div>
+          </div>
+        </details>
+
+        <div id="preset-panel" class="config-grid hidden">
+          <div>
+            <label for="resolution">分辨率预设</label>
+            <select id="resolution" name="resolution">
+              <option value="480p">480p</option>
+              <option value="768p" selected>768p</option>
+            </select>
+          </div>
+          <div>
+            <label for="preset-duration">时长（秒）</label>
+            <select id="preset-duration" name="duration">
+              <option value="5">5 秒</option>
+              <option value="6">6 秒</option>
+              <option value="7">7 秒</option>
+              <option value="8">8 秒</option>
+              <option value="9">9 秒</option>
+              <option value="10">10 秒</option>
+              <option value="11">11 秒</option>
+              <option value="12">12 秒</option>
+              <option value="13">13 秒</option>
+              <option value="14">14 秒</option>
+              <option value="15">15 秒</option>
+            </select>
+            <small>预设路径直接使用 buckets.yaml 的画布，时长由你决定。</small>
+          </div>
+        </div>
+
+        <div class="config-grid">
+          <div>
+            <label for="aspect">宽高比</label>
+            <select id="aspect" name="aspect">
+              <option value="21:9">21:9</option>
+              <option value="16:9" selected>16:9</option>
+              <option value="3:2">3:2</option>
+              <option value="4:3">4:3</option>
+              <option value="5:4">5:4</option>
+              <option value="1:1">1:1</option>
+              <option value="4:5">4:5</option>
+              <option value="3:4">3:4</option>
+              <option value="2:3">2:3</option>
+              <option value="9:16">9:16</option>
+              <option value="9:21">9:21</option>
+            </select>
+            <small>与 buckets.yaml 一致的 11 种宽高比族。</small>
+          </div>
+          <div id="override-fields">
+            <label class="check-label"><input id="override" name="override" type="checkbox"> 手动覆盖画布 / 时长</label>
+            <div id="override-inputs" class="field-grid hidden">
+              <div>
+                <label for="override-width">宽（32 的倍数）</label>
+                <input id="override-width" name="override_width" type="number" min="32" max="8192" step="32" inputmode="numeric" placeholder="自动">
+              </div>
+              <div>
+                <label for="override-height">高（32 的倍数）</label>
+                <input id="override-height" name="override_height" type="number" min="32" max="8192" step="32" inputmode="numeric" placeholder="自动">
+              </div>
+              <div class="span-2">
+                <label for="override-duration">强制时长（秒，留空则自动）</label>
+                <input id="override-duration" name="override_duration" type="number" min="5" max="15" step="1" inputmode="numeric" placeholder="自动">
+              </div>
+            </div>
+            <label class="checkbox">
+              <input id="allow-canvas-shrink" name="allow_canvas_shrink" type="checkbox" value="1">
+              <span>预算不足时自动缩小画布</span>
+            </label>
+            <small>默认关闭：目标 MP 在预算内放不下 5 秒时会直接报错，避免画布被悄悄替换。覆盖画布后仍会校验 32 px 网格与 1:4–4:1 宽高比；超过预算只会提示，不阻止提交。</small>
+          </div>
+        </div>
+
+        <div id="plan-summary" class="plan-summary" role="status" aria-live="polite">
+          <div class="plan-main">正在计算…</div>
+          <div class="plan-detail"></div>
+          <ul class="plan-notes"></ul>
+        </div>
+      </section>
+
+      <section class="config-panel" aria-labelledby="seed-heading">
+        <h2 id="seed-heading">随机种子</h2>
+        <div class="seed-row">
+          <input id="seed" name="seed" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-describedby="seed-hint seed-error">
+          <button type="button" class="secondary-button" id="seed-plus" title="种子 +1">+1</button>
+          <button type="button" class="secondary-button" id="seed-minus" title="种子 −1">−1</button>
+          <div class="segmented small" id="seed-mode" role="tablist" aria-label="种子模式">
+            <button type="button" role="tab" data-seed-mode="random" aria-selected="true">随机</button>
+            <button type="button" role="tab" data-seed-mode="fixed" aria-selected="false">固定</button>
+          </div>
+          <button type="button" class="secondary-button" id="seed-reroll" title="立即换一个随机种子">换一个</button>
+        </div>
+        <p id="seed-hint" class="muted seed-hint">
+          随机模式：每次提交后自动换新的种子；手动输入或 +1/−1 会切换为“固定”。
+        </p>
+        <p id="seed-error" class="error" role="alert"></p>
+      </section>
+
+      <details id="advanced-settings" class="advanced-settings">
+        <summary>高级设置</summary>
+        <div class="field-stack advanced-fields">
+          <div class="field-grid">
+            <div>
+              <label for="base-path">基座权重目录</label>
+              <input id="base-path" name="base_path" spellcheck="false" autocomplete="off">
+              <small>包含 transformer / transformer_ref 的本地快照，例如 models/MiniMax-H3-ref。</small>
+            </div>
+            <div>
+              <label for="adapter-path">适配器目录</label>
+              <input id="adapter-path" name="adapter_path" spellcheck="false" autocomplete="off">
+              <small>包含 fl2va / ref2va 子目录，例如 models/Pika-H3-Flex。</small>
+            </div>
+          </div>
+          <div class="field-grid">
+            <div>
+              <label for="model-repo">模型仓库</label>
+              <input id="model-repo" name="model_repo" spellcheck="false" autocomplete="off">
+            </div>
+            <div>
+              <label for="revision">提交 SHA</label>
+              <input id="revision" name="revision" spellcheck="false" autocomplete="off">
+            </div>
+          </div>
+          <div class="check-row">
+            <label class="check-label"><input id="low-vram" name="low_vram" type="checkbox" checked>
+              低显存（--low-vram，NPU 必需）</label>
+            <label class="check-label"><input id="tensor-parallel" name="tensor_parallel" type="checkbox">
+              双卡张量并行（--tensor-parallel 2）</label>
+          </div>
+          <small>张量并行通过 torchrun --nproc_per_node=2 启动，需要两张可用 NPU；单卡请保持关闭。</small>
+        </div>
+      </details>
+
+      <p id="form-error" class="error" role="alert"></p>
+      <div class="form-actions">
+        <span id="queue-hint" class="muted"></span>
+        <button id="submit-button" type="submit">开始生成</button>
+      </div>
+    </form>
+
+    <section class="card current-card">
+      <div class="section-title">
+        <h2>当前任务</h2>
+        <a id="current-log-link" class="hidden" href="#">查看完整日志 →</a>
+      </div>
+      <div id="current-empty" class="muted">暂无任务。提交后可在此查看实时进度与日志。</div>
+      <div id="current-task" class="hidden">
+        <div class="status-line">
+          <strong id="current-status">—</strong>
+          <span id="current-stage"></span>
+        </div>
+        <div class="progress"><div id="current-progress-bar" class="progress-bar" role="progressbar"
+          aria-label="总体进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div>
+        <p id="current-meta" class="muted"></p>
+        <p id="current-seed" class="seed-readout"></p>
+        <p id="current-error" class="error" role="alert"></p>
+        <div class="current-actions">
+          <button type="button" id="cancel-button" class="secondary-button hidden">取消任务</button>
+          <a id="current-download" class="button-link hidden" download>下载 MP4</a>
+          <a id="current-json" class="button-link secondary hidden" download>下载 JSON</a>
+        </div>
+        <pre id="current-log" class="log-view" aria-label="实时日志" aria-live="polite">等待日志…</pre>
+        <div id="current-video" class="video-panel hidden">
+          <h2>生成结果</h2>
+          <video id="current-player" controls preload="metadata"></video>
+        </div>
+      </div>
+    </section>
+
+    <section class="card history-card">
+      <div class="section-title"><h2>历史任务</h2></div>
+      <div id="history" class="history-list"><div class="muted">正在获取历史记录…</div></div>
+    </section>
+  </main>
+  <script src="/static/seed.js"></script>
+  <script src="/static/app.js"></script></body>
+</html>

@@ -27,6 +27,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from . import accelerator
 from . import geometry as G
 from .packing import audio_storage_to_external, video_storage_to_external
 from .pipeline_geometry import reference_canvas_size
@@ -247,15 +248,17 @@ def fit_reference_image(image: Image.Image, geom: Geometry, rule: str, short_edg
 class H3ConditionEncoder:
     """Stage-loaded Qwen3-VL + VAEs. ``encode(request)`` returns CPU tensors ready for ``H3DiffusionWrapper``."""
 
-    def __init__(self, checkpoint: str, device: torch.device | str = "cuda", keep_loaded: bool = False, text_encoder_checkpoint: str | None = None):
+    def __init__(self, checkpoint: str, device: torch.device | str | None = None, keep_loaded: bool = False, text_encoder_checkpoint: str | None = None, offload: bool = False):
         self.checkpoint = Path(checkpoint)
         # Optionally load the tokenizer, processor and encoder from a separate complete snapshot.
         self.text_encoder_checkpoint = Path(text_encoder_checkpoint) if text_encoder_checkpoint else self.checkpoint
-        self.device = torch.device(device)
+        self.device = torch.device(device) if device is not None else accelerator.device()
         self.keep_loaded = keep_loaded
+        self.offload = offload
         self._te = None
         self._vae = None
         self._audio_vae = None
+        self._vae_hooks = []
 
     # ---- component staging
     def _load_text_encoder(self):
@@ -266,9 +269,14 @@ class H3ConditionEncoder:
             root = self.text_encoder_checkpoint
             tok = AutoTokenizer.from_pretrained(root / "tokenizer")
             proc = AutoProcessor.from_pretrained(root / "processor")
-            te = Qwen3VLForConditionalGeneration.from_pretrained(root / "text_encoder", dtype=torch.bfloat16).to(self.device).eval()
-            self._te = (tok, proc, te)
-            print(f"[cond] Qwen3-VL loaded in {time.time() - t0:.1f}s", flush=True)
+            te = Qwen3VLForConditionalGeneration.from_pretrained(root / "text_encoder", dtype=torch.bfloat16)
+            if self.offload:
+                # The encoder alone is larger than one device: stream it in by leaf.
+                accelerator.offload_leaves(te, self.device)
+            else:
+                te = te.to(self.device)
+            self._te = (tok, proc, te.eval())
+            print(f"[cond] Qwen3-VL loaded in {time.time() - t0:.1f}s (offload={self.offload})", flush=True)
         return self._te
 
     def _load_vaes(self):
@@ -276,9 +284,17 @@ class H3ConditionEncoder:
             from diffusers import AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio
 
             t0 = time.time()
-            self._vae = AutoencoderKLMiniMaxH3.from_pretrained(self.checkpoint / "vae", torch_dtype=torch.float32).to(self.device).eval()
-            self._audio_vae = AutoencoderKLMiniMaxH3Audio.from_pretrained(self.checkpoint / "audio_vae", torch_dtype=torch.float32).to(self.device).eval()
-            print(f"[cond] VAEs loaded in {time.time() - t0:.1f}s", flush=True)
+            self._vae = AutoencoderKLMiniMaxH3.from_pretrained(self.checkpoint / "vae", torch_dtype=torch.float32)
+            self._audio_vae = AutoencoderKLMiniMaxH3Audio.from_pretrained(self.checkpoint / "audio_vae", torch_dtype=torch.float32)
+            if self.offload:
+                # Keep the 9.7 GiB video VAE on CPU and move it in whole around the
+                # encode stage; the 0.56 GiB audio VAE stays resident.
+                self._vae = self._vae.eval()
+                self._audio_vae = self._audio_vae.to(self.device).eval()
+            else:
+                self._vae = self._vae.to(self.device).eval()
+                self._audio_vae = self._audio_vae.to(self.device).eval()
+            print(f"[cond] VAEs loaded in {time.time() - t0:.1f}s (offload={self.offload})", flush=True)
         return self._vae, self._audio_vae
 
     def free(self, what: str = "all"):
@@ -286,11 +302,11 @@ class H3ConditionEncoder:
             self._te = None
         if what in ("vae", "all"):
             self._vae = self._audio_vae = None
+            self._vae_hooks = []
         import gc
 
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        accelerator.empty_cache()
 
     # ---- encoding
     @torch.no_grad()
@@ -321,7 +337,12 @@ class H3ConditionEncoder:
 
         vae, _ = self._load_vaes()
         pixels = torch.from_numpy(np.array(image)).to(self.device).permute(2, 0, 1)[None, :, None]
+        if self.offload:
+            vae.to(self.device)
         lat = encode_vae_condition(vae, pixels, PIXEL_MEAN, PIXEL_STD, KEYFRAME_ENCODE_SEED)  # [1,24,1,H,W] cpu fp32
+        if self.offload:
+            vae.to("cpu")
+            accelerator.empty_cache()
         return video_storage_to_external(lat[0]).unsqueeze(0).contiguous()
 
     @torch.no_grad()
@@ -330,7 +351,12 @@ class H3ConditionEncoder:
         vae, _ = self._load_vaes()
         count = G.align_num_frames_down(len(frames))
         pixels = torch.from_numpy(frames[:count].copy()).to(self.device).permute(3, 0, 1, 2)[None]
+        if self.offload:
+            vae.to(self.device)
         lat = encode_vae_condition(vae, pixels, PIXEL_MEAN, PIXEL_STD, KEYFRAME_ENCODE_SEED)
+        if self.offload:
+            vae.to("cpu")
+            accelerator.empty_cache()
         return video_storage_to_external(lat[0]).unsqueeze(0).contiguous()
 
     @torch.no_grad()
@@ -343,6 +369,33 @@ class H3ConditionEncoder:
         lat = audio_vae.encode(samples, return_dict=False)[0].mode().float().cpu()  # [2,32,T]
         lat = (lat - mean) / std
         return audio_storage_to_external(lat).unsqueeze(0).contiguous()
+
+    def skeleton(self, req: Request) -> Dict[str, Any]:
+        """Container structure with deterministic non-tensor leaves, no model work.
+
+        Used by non-source tensor-parallel ranks to rebuild the conditioning they
+        receive. ``packed_tokens`` is recomputed by the source after encoding, so
+        it is left out here and carried over by :func:`broadcast_conditioning`.
+        """
+        geom = resolve_geometry(req)
+        normalized, ref_sizes = normalize_references(req, geom) if req.task == "ref2va" else ([], [])
+        cond: Dict[str, Any] = {"prompt_embeds": None, "text_token_tags": None,
+                                "keyframes": [], "references": []}
+        for anchor, _ in req.keyframes():
+            cond["keyframes"].append({"anchor": anchor, "latents": None})
+        if req.task == "ref2va":
+            for ref in normalized:
+                entry = {"kind": ref.kind}
+                if ref.kind in ("image", "video"):
+                    entry["video_latents"] = None
+                if ref.has_audio:
+                    entry["audio_latents"] = None
+                cond["references"].append(entry)
+        cond["geometry"] = geom
+        if req.task == "ref2va":
+            cond["reference_images"] = ref_sizes
+        cond["packed_tokens"] = None
+        return cond
 
     def encode(self, req: Request) -> Dict[str, Any]:
         if req.task not in TASKS:

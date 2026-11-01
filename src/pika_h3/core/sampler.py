@@ -3,14 +3,16 @@
 """Six-forward consistency re-noising, matching the released students."""
 import torch
 from . import geometry as G
+from .accelerator import device as default_device
 from .evaluation import sample_evaluation_ladder
 from .schedules import H3SigmaSchedule
 
 DEFAULT_KNOTS = (1000, 750, 500, 250, 100, 40, 0)
 
 @torch.no_grad()
-def sample_ladder(wrapper, cond, *, seed=0, device="cuda", knots=DEFAULT_KNOTS,
+def sample_ladder(wrapper, cond, *, seed=0, device=None, knots=DEFAULT_KNOTS,
                   video_shift=12.0, audio_shift=3.0, noise=None, condition_rows=None):
+    device = default_device() if device is None else device
     geom = cond["geometry"]
     schedule = H3SigmaSchedule({"denoising_step_list": list(knots),
         "video_score_sigma_shift": video_shift, "audio_score_sigma_shift": audio_shift}, device=device)

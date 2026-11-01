@@ -1,13 +1,39 @@
---extra-index-url https://download.pytorch.org/whl/cu129
-torch==2.13.0+cu129
-torchvision==0.28.0+cu129
+# Ascend NPU 推理环境（本机已验证）
+#
+# 安装顺序不能颠倒，torch 必须来自 PyTorch 官方 CPU 源：
+#   PyPI 上的 torch==2.14.0 是 CUDA 构建，和 torch_npu 同时加载会直接 abort：
+#   ValueError: Duplicated key 'pinned_reserve_segment_size_mb'
+#
+#   python -m pip install -r requirements.txt
+#   python tools/apply_diffusers_patches.py
+#   python -m pip install --no-deps -e .
+#
+# torchvision 虽未被项目源码直接 import，但 transformers 的
+# Qwen3VLVideoProcessor 在加载 processor 时强制要求它，缺失会报
+# "Qwen3VLVideoProcessor requires the Torchvision library"。
+
+--index-url https://mirrors.cloud.tencent.com/pypi/simple
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- 设备栈（必须 CPU 构建的 torch）---
+torch==2.14.0+cpu
+torchvision==0.29.2+cpu
+torch_npu==2.14.0
+
+# --- 模型运行时 ---
 transformers==5.15.0
 peft==0.20.0
+accelerate==1.14.0
+safetensors==0.8.0
+huggingface-hub==1.30.0
+
+# --- 媒体与数值 ---
 av==18.1.0
 numpy==2.5.2
 pillow==12.3.0
 pyyaml==6.0.3
-safetensors==0.8.0
-huggingface-hub==1.30.0
-accelerate==1.14.0
-diffusers @ git+https://github.com/huggingface/diffusers.git@3a2f35d4efa4c059c8bfb3bc0d6c906264895c81
+
+# diffusers 必须锁到上游固定提交 3a2f35d4efa4c059c8bfb3bc0d6c906264895c81，
+# 仓库补丁按该提交的文件校验和生成。用 codeload tarball 而不是 git+https：
+# 后者在本机偶发 TLS 中断，且 tarball 不带 git 历史、安装更快。
+diffusers @ https://codeload.github.com/huggingface/diffusers/tar.gz/3a2f35d4efa4c059c8bfb3bc0d6c906264895c81

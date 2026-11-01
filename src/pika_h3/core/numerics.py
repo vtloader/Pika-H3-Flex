@@ -4,10 +4,13 @@
 
 FP32 conditioning preserves floating latent inputs in float32; BF16 conditioning
 casts conditioning tensors to the prompt dtype. Both inference policies disable
-TF32 matrix multiplication and enable cuDNN TF32."""
+TF32 matrix multiplication and enable cuDNN TF32 on CUDA. Other backends (NPU,
+CPU) keep their own precision defaults; see ``accelerator.configure_precision``."""
 from __future__ import annotations
 
 import torch
+
+from . import accelerator
 
 FP32_CONDITIONING = "fp32_conditioning_v1"
 BF16_CONDITIONING = "bf16_conditioning_v1"
@@ -35,10 +38,10 @@ def configure_numerics_backend(policy: str, *, runtime: str) -> dict[str, bool]:
 
     Reset both flags explicitly before execution. These flags do not change
     parameter/state dtypes or the model's explicit BF16 module boundaries.
+    On non-CUDA backends the flags are not applicable and stay untouched.
     """
     settings = numerics_backend_settings(policy, runtime=runtime)
-    torch.backends.cuda.matmul.allow_tf32 = settings["matmul_allow_tf32"]
-    torch.backends.cudnn.allow_tf32 = settings["cudnn_allow_tf32"]
+    accelerator.configure_precision(settings["matmul_allow_tf32"], settings["cudnn_allow_tf32"])
     return settings
 
 

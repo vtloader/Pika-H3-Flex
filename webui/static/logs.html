@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pika H3 Flex · 任务日志</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="logs-header">
+      <a href="/">← 返回生成页</a>
+      <p class="eyebrow">任务日志</p>
+      <h1 id="task-heading">任务 {{TASK_ID}}</h1>
+      <p id="task-meta" class="muted">正在获取状态…</p>
+    </header>
+
+    <section class="card">
+      <div class="status-line">
+        <strong id="task-status">正在获取状态…</strong>
+        <span id="task-stage"></span>
+      </div>
+      <div class="progress">
+        <div id="task-progress-bar" class="progress-bar" role="progressbar"
+          aria-label="总体进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div>
+      </div>
+      <p id="task-plan" class="muted"></p>
+      <p id="task-seed" class="seed-readout"></p>
+      <p id="task-error" class="error" role="alert"></p>
+      <p id="task-refresh-error" class="error" role="status"></p>
+
+      <div class="download-row">
+        <a id="download-video" class="button-link hidden" download>下载 MP4</a>
+        <a id="download-json" class="button-link secondary hidden" download>下载 JSON</a>
+        <button type="button" id="cancel-task" class="secondary-button hidden">取消任务</button>
+      </div>
+
+      <div id="task-video" class="video-panel hidden">
+        <h2>生成结果</h2>
+        <video id="video-player" controls preload="metadata"></video>
+      </div>
+
+      <pre id="task-log" class="log-view" aria-label="任务日志" aria-live="polite">正在获取日志…</pre>
+    </section>
+  </main>
+  <script>window.WEBUI_TASK_ID = "{{TASK_ID}}";</script>
+  <script src="/static/logs.js"></script>
+</body>
+</html>

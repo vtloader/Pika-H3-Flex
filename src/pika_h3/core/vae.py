@@ -18,18 +18,33 @@ from typing import Optional
 import numpy as np
 import torch
 
+from . import accelerator
 from . import geometry as G
 
 
 class H3Decoders:
-    def __init__(self, checkpoint_dir: str, *, device: str | torch.device = "cpu", dtype: torch.dtype = torch.float32):
+    def __init__(self, checkpoint_dir: str, *, device: str | torch.device = "cpu", dtype: torch.dtype = torch.float32, offload: bool = False):
         # The released VAEs keep fp32 biases/norms; the pipeline runs them in fp32 (10 GB video VAE) — keep that.
         from diffusers import AutoencoderKLMiniMaxH3, AutoencoderKLMiniMaxH3Audio
 
-        self.vae = AutoencoderKLMiniMaxH3.from_pretrained(checkpoint_dir, subfolder="vae", torch_dtype=dtype).to(device).eval()
-        self.audio_vae = AutoencoderKLMiniMaxH3Audio.from_pretrained(checkpoint_dir, subfolder="audio_vae", torch_dtype=dtype).to(device).eval()
+        self.vae = AutoencoderKLMiniMaxH3.from_pretrained(checkpoint_dir, subfolder="vae", torch_dtype=dtype)
+        self.audio_vae = AutoencoderKLMiniMaxH3Audio.from_pretrained(checkpoint_dir, subfolder="audio_vae", torch_dtype=dtype)
         self.device = torch.device(device)
         self.dtype = dtype
+        if offload:
+            # Video VAE is 9.7 GiB fp32: keep it on CPU and move it in whole around
+            # the decode stage. Leaf hooks are unsafe for it, and accelerate's module
+            # hook only fires on ``forward`` while diffusers calls ``decode``.
+            # The audio VAE is 0.56 GiB and uses ``weight_norm`` weights, so it stays
+            # resident on the device instead of being shuttled.
+            self._offload = True
+            self.audio_vae = self.audio_vae.to(self.device)
+        else:
+            self._offload = False
+            self.vae = self.vae.to(self.device)
+            self.audio_vae = self.audio_vae.to(self.device)
+        self.vae = self.vae.eval()
+        self.audio_vae = self.audio_vae.eval()
         self.video_mean = torch.tensor(self.vae.config.latents_mean, device=self.device).view(1, -1, 1, 1, 1)
         self.video_std = torch.tensor(self.vae.config.latents_std, device=self.device).view(1, -1, 1, 1, 1)
         self.audio_mean = torch.tensor(self.audio_vae.config.latents_mean, device=self.device).view(1, -1, 1)
@@ -50,7 +65,12 @@ class H3Decoders:
         """``[F, 24, H, W]`` normalized -> uint8 frames ``[N, H*16, W*16, 3]``."""
         lat = latents_external.to(self.device, torch.float32).permute(1, 0, 2, 3).unsqueeze(0)
         lat = lat * self.video_std + self.video_mean
+        if self._offload:
+            self.vae.to(self.device)
         video = self.vae.decode(lat.to(self.dtype), return_dict=False)[0]  # [1, 3, N, H, W] in pixel_mean/std space?
+        if self._offload:
+            self.vae.to("cpu")
+            accelerator.empty_cache()
         video = video[0].float()
         # The pipeline's decode step reverts the VAE's own pixel normalization; mirror it if the VAE exposes it.
         mean = torch.tensor((0.485, 0.456, 0.406), device=video.device).view(3, 1, 1, 1)
@@ -71,7 +91,6 @@ class H3Decoders:
         audio = self.audio_vae.decode(lat.to(self.dtype), return_dict=False)[0]
         audio = audio.float().reshape(G.AUDIO_CHANNELS, -1).clamp(-1, 1).cpu().numpy()
         return audio
-
 
 def write_mp4(path: str, frames: np.ndarray, fps: int = G.FPS, audio: Optional[np.ndarray] = None, sample_rate: int = G.AUDIO_SAMPLE_RATE) -> None:
     """Write frames (+ optional stereo audio) with PyAV."""

@@ -15,6 +15,7 @@ from typing import Any, Dict
 import numpy as np
 import torch
 
+from . import accelerator
 from . import geometry as G
 from .sampling import few_step_sample
 
@@ -23,23 +24,24 @@ EVAL_NOISE_VERSION = "pika-flex-noise-v1"
 
 @contextmanager
 def evaluation_noise_scope(seed: int, device):
-    """Isolate augmentation RNG, touching only CPU and the selected CUDA device.
+    """Isolate augmentation RNG, touching only CPU and the selected accelerator device.
 
     Unlike ``torch.manual_seed``, seeding the CPU default generator directly does
-    not seed every visible CUDA device. This matters for one-process-per-GPU jobs.
+    not seed every visible device. This matters for one-process-per-device jobs.
+    ``device`` may be CUDA or Ascend NPU; CPU-only devices fork the CPU RNG.
     """
     device = torch.device(device)
-    devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+    fork_kwargs = accelerator.fork_rng_kwargs(device)
+    devices = fork_kwargs["devices"]
     python_state, numpy_state = random.getstate(), np.random.get_state()
     augmentation_seed = int(seed) + 7919
     try:
-        with torch.random.fork_rng(devices=devices):
+        with torch.random.fork_rng(**fork_kwargs):
             random.seed(augmentation_seed)
             np.random.seed(augmentation_seed % (2**32))
             torch.random.default_generator.manual_seed(augmentation_seed)
             if devices:
-                with torch.cuda.device(devices[0]):
-                    torch.cuda.manual_seed(augmentation_seed)
+                accelerator.manual_seed(augmentation_seed, torch.device(device.type, devices[0]))
             yield
     finally:
         random.setstate(python_state)
