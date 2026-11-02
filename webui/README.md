@@ -125,6 +125,10 @@ H3 分辨率选择一致。按面积精确搜索会得到 1888×1056 这类陌�
 勾选“双卡张量并行”时改用
 `python -m torch.distributed.run --standalone --nproc_per_node=2 -m pika_h3.cli ... --tensor-parallel 2`。
 
+“VAE 解码精度”下拉框把 `--vae-decode-dtype` 传给 CLI：默认 `fp16`（约 2× 快，
+与 fp32 逐像素差 ≤ 2/255），`fp32` 与旧版逐位相同。该选择随任务记录写入
+`state.json` 与输出 JSON 的 `vae_decode_dtype` 字段。
+
 `pika_h3/pipeline.py` 会输出机器可读标记：
 
 ```
@@ -156,7 +160,7 @@ H3 分辨率选择一致。按面积精确搜索会得到 1888×1056 这类陌�
 ## 测试
 
 ```bash
-.venv312/bin/python -m unittest webui.tests.test_webui -v   # 33 项：MP 数学、参考限制、--canvas、种子、进度标记
+.venv312/bin/python -m unittest webui.tests.test_webui -v   # 42 项：MP 数学、参考限制、--canvas、种子、进度标记、VAE 解码
 node webui/tests/seed_flow_test.js                          # 随机/固定、提交后刷新、持久化
 bash webui/tests/e2e_dry_run.sh 3112                        # 自带 dry-run 服务器的端到端检查
 ```

@@ -530,5 +530,115 @@ class ProgressMarkerTests(unittest.TestCase):
         self.assertEqual(public["seed"], 424242)
 
 
+class VaeDecodeTests(unittest.TestCase):
+    """Sharded / streamed VAE decode: chunk geometry and rank ranges (no NPU needed)."""
+
+    def test_chunk_ranges_cover_every_chunk_once(self) -> None:
+        from pika_h3.core.vae import chunk_ranges
+
+        for chunks in (1, 7, 14, 23):
+            for world in (1, 2, 3, 4, 8):
+                ranges = chunk_ranges(chunks, world)
+                self.assertEqual(len(ranges), world)
+                self.assertEqual(ranges[0][0], 0)
+                self.assertEqual(ranges[-1][1], chunks)
+                for (_, end), (start, _) in zip(ranges, ranges[1:]):
+                    self.assertEqual(end, start)
+                for start, end in ranges:
+                    self.assertLessEqual(start, end)
+                # Lowest ranks take the extra chunks so rank 0 never trails.
+                sizes = [end - start for start, end in ranges]
+                self.assertGreaterEqual(sizes[0], sizes[-1])
+                self.assertLessEqual(max(sizes) - min(sizes), 1)
+
+    def test_chunk_layout_matches_upstream_geometry(self) -> None:
+        """Chunk padding/overlap must reproduce the VAE's own decode arithmetic."""
+        from pika_h3.core.vae import chunk_ranges  # noqa: F401 - import check
+
+        clip_length, token_drop, temporal_ratio = 17, 3, 4
+        tokens_chunk_size = -(-clip_length // temporal_ratio)
+        token_overlap = (-token_drop) % tokens_chunk_size
+        frame_pre_padding = (-clip_length) % temporal_ratio
+        frames_per_chunk = tokens_chunk_size * temporal_ratio - frame_pre_padding
+        frame_overlap = max(token_overlap * temporal_ratio - frame_pre_padding, 0)
+        for latents, frames in ((37, 124), (72, 243), (10, 34), (8, 26)):
+            tokens = latents + token_drop
+            pad = (-tokens) % tokens_chunk_size
+            chunks = (tokens + pad) // tokens_chunk_size - int(token_drop > 0)
+            # Upstream drops `pad_tokens * temporal_ratio` (or `clip_length %
+            # temporal_ratio` at a chunk boundary) pixel frames off the clip end.
+            dropped = sum(clip_length % temporal_ratio
+                          if clip_length % temporal_ratio and (latents + k) % tokens_chunk_size == 0
+                          else temporal_ratio for k in range(pad))
+            # Every chunk but the last emits `frames_per_chunk`; the trailing
+            # overlap block is shorter by exactly `frame_overlap`.
+            self.assertEqual(chunks * frames_per_chunk + frame_overlap - dropped, frames)
+
+    def test_decode_dtype_and_tile_batch_env(self) -> None:
+        """``PIKA_VAE_DECODE_DTYPE`` / ``PIKA_VAE_TILE_BATCH`` are validated, not trusted."""
+        import torch
+        from unittest import mock
+        from pika_h3.core import vae as V
+
+        with mock.patch.dict("os.environ", {"PIKA_VAE_DECODE_DTYPE": "fp16"}):
+            self.assertIs(V.decode_dtype(), torch.float16)
+        with mock.patch.dict("os.environ", {"PIKA_VAE_DECODE_DTYPE": "bf16"}):
+            self.assertIs(V.decode_dtype(), torch.bfloat16)
+        with mock.patch.dict("os.environ", {"PIKA_VAE_DECODE_DTYPE": ""}):
+            self.assertIs(V.decode_dtype(), torch.float32)
+        with mock.patch.dict("os.environ", {"PIKA_VAE_DECODE_DTYPE": "fp8"}):
+            with self.assertRaises(ValueError):
+                V.decode_dtype()
+        with mock.patch.dict("os.environ", {"PIKA_VAE_TILE_BATCH": "6"}):
+            self.assertEqual(V.tile_batch_size(), 6)
+        with mock.patch.dict("os.environ", {"PIKA_VAE_TILE_BATCH": "0"}):
+            with self.assertRaises(ValueError):
+                V.tile_batch_size()
+        with mock.patch.dict("os.environ", {"PIKA_VAE_TILE_BATCH": ""}):
+            self.assertEqual(V.tile_batch_size(3), 3)
+
+    def test_webui_vae_decode_dtype_plumbing(self) -> None:
+        """The submit form reaches the CLI and is validated like any other option."""
+        fields = {"mode": ["text"], "prompt": ["hi"], "seed": ["5"],
+                  "canvas_mode": ["preset"], "resolution": ["480p"],
+                  "aspect": ["16:9"], "duration": ["5"]}
+        submission, _ = server.validate_submission(dict(fields), {})
+        self.assertEqual(submission.vae_decode_dtype, "fp16")
+        submission, _ = server.validate_submission({**fields, "vae_decode_dtype": ["fp32"]}, {})
+        task = server.Task(
+            id="20260101-000000-deadbeef", mode="text", task="t2va", prompt="x",
+            plan={"width": 832, "height": 480, "frames": 124, "duration_seconds": 5},
+            seed=1, low_vram=True, tensor_parallel=False,
+            model={"repo": "r", "revision": "0" * 40, "base_path": "", "adapter_path": "",
+                   "text_encoder_path": ""},
+            vae_decode_dtype=submission.vae_decode_dtype)
+        command = server.build_command(task, Path("/tmp/run"))
+        self.assertEqual(command[command.index("--vae-decode-dtype") + 1], "fp32")
+        with self.assertRaises(server.SubmissionError):
+            server.validate_submission({**fields, "vae_decode_dtype": ["fp64"]}, {})
+
+    def test_write_mp4_chunks_matches_array_writer(self) -> None:
+        """Streaming blocks (and the overlap thread) produce the same file."""
+        import tempfile
+        import numpy as np
+        from pika_h3.core.vae import write_mp4, write_mp4_chunks
+
+        rng = np.random.default_rng(0)
+        frames = rng.integers(0, 256, (9, 48, 64, 3), dtype=np.uint8)
+        audio = np.zeros((2, 4800), dtype=np.float32)
+        with tempfile.TemporaryDirectory() as tmp:
+            one = Path(tmp) / "one.mp4"
+            many = Path(tmp) / "many.mp4"
+            threaded = Path(tmp) / "threaded.mp4"
+            write_mp4(str(one), frames, audio=audio)
+            write_mp4_chunks(str(many), (frames[i:i + 4] for i in range(0, 9, 4)),
+                             width=64, height=48, audio=audio)
+            written = write_mp4_chunks(str(threaded), (frames[i:i + 5] for i in range(0, 9, 5)),
+                                       width=64, height=48, audio=audio, overlap=True, lookahead=2)
+            self.assertEqual(written, 9)
+            self.assertEqual(one.read_bytes(), many.read_bytes())
+            self.assertEqual(one.read_bytes(), threaded.read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()

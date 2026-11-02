@@ -52,7 +52,11 @@ def parser():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--cpu-offload", action="store_true", help="Offload transformer blocks to CPU between forwards to reduce VRAM; slower and requires host RAM")
     p.add_argument("--low-vram", action="store_true", help="Also stream the text encoder and both VAEs from CPU host memory; required when a component alone exceeds device memory (implied by --cpu-offload)")
-    p.add_argument("--tensor-parallel", type=int, choices=[1, 2], default=1, help="Shard the transformer across N ranks with HCCL weight tensor parallelism (launch with torchrun --nproc_per_node=N)")
+    p.add_argument("--tensor-parallel", type=int, choices=range(1, 9), default=1, help="Shard the transformer across N ranks with HCCL weight tensor parallelism (launch with torchrun --nproc_per_node=N)")
+    p.add_argument("--vae-decode-dtype", choices=["fp16", "fp32", "bf16"], default="fp16",
+                   help="Video VAE decode compute precision: fp16 (default, the recipe upstream validates with, "
+                        "~2.2x faster on Ascend) or fp32 (bit-exact to the released weights, ~2.2x slower). "
+                        "Also settable with PIKA_VAE_DECODE_DTYPE.")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--model-repo", default="Pika-Labs/Pika-H3-Flex")
     p.add_argument("--revision", required=True, help="Immutable HF adapter repository commit")

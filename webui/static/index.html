@@ -266,6 +266,13 @@
               低显存（--low-vram，NPU 必需）</label>
             <label class="check-label"><input id="tensor-parallel" name="tensor_parallel" type="checkbox">
               双卡张量并行（--tensor-parallel 2）</label>
+            <label class="check-label" for="vae-decode-dtype">VAE 解码精度
+              <select id="vae-decode-dtype" name="vae_decode_dtype">
+                <option value="fp16" selected>fp16（默认，约 2× 快）</option>
+                <option value="fp32">fp32（逐位精确，较慢）</option>
+                <option value="bf16">bf16（快，误差较大）</option>
+              </select>
+            </label>
           </div>
           <small>张量并行通过 torchrun --nproc_per_node=2 启动，需要两张可用 NPU；单卡请保持关闭。</small>
         </div>

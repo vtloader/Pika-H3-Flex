@@ -39,7 +39,11 @@ from . import accelerator
 
 
 def shard_interval(size: int, rank: int, world_size: int) -> slice:
-    """Contiguous equal shard; ``size`` must divide evenly by ``world_size``."""
+    """Contiguous shard; ``size`` must divide evenly by ``world_size``.
+
+    Equally sized shards keep every rank's kernel shapes identical, which is what
+    the HCCL collectives and the per-rank memory budget assume.
+    """
     if size % world_size:
         raise ValueError(f"dimension {size} is not divisible by tp world size {world_size}")
     step = size // world_size
@@ -89,6 +93,9 @@ def adapter_factors(linear):
     if linear.lora_bias.get(name, False):
         raise ValueError("tensor parallel does not support LoRA with a bias")
     return (linear.lora_A[name].weight, linear.lora_B[name].weight, linear.scaling[name])
+
+
+MAX_WORLD_SIZE = 8
 
 
 class ColumnLinear(nn.Module):
@@ -174,8 +181,12 @@ def install_tensor_parallel(model, rank: int, world_size: int) -> dict:
     """
     if getattr(model, "_pika_tensor_parallel", None) is not None:
         raise RuntimeError("tensor parallel is already installed")
-    if world_size != 2:
-        raise ValueError("only two-rank tensor parallelism is implemented and validated")
+    if world_size < 2:
+        raise ValueError("tensor parallel needs at least two ranks")
+    # The split is uniform over heads and FFN channels, so any world size that
+    # divides both works; two ranks is what has been measured on this machine.
+    if not 1 <= world_size <= MAX_WORLD_SIZE:
+        raise ValueError(f"tensor parallel supports 1-{MAX_WORLD_SIZE} ranks, got {world_size}")
     if model.training:
         raise ValueError("tensor parallel is inference-only; call model.eval() first")
 

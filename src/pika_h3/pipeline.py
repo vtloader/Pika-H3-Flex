@@ -197,7 +197,7 @@ def generate(args):
     from .core.schedules import H3SigmaSchedule
     from .core.evaluation import sample_evaluation_ladder
     from .core.wrapper import H3DiffusionWrapper
-    from .core.vae import H3Decoders, write_mp4
+    from .core.vae import H3Decoders, chunk_ranges, write_mp4_chunks
     from .core import accelerator
     from .core import geometry as G
 
@@ -332,43 +332,122 @@ def generate(args):
     gc.collect()
     accelerator.empty_cache()
     if tp_world > 1:
-        # Both ranks sampled the same latent; only rank 0 decodes and writes, and
-        # the second rank waits so the collective order stays fixed.
         import torch.distributed as dist
-        if tp_rank != 0:
-            dist.barrier()
-            dist.destroy_process_group()
-            return
+    import numpy as np
     start = time.monotonic()
     accelerator.reset_peak_memory_stats()
     _progress("decode", 85, what="decoders")
-    decoders = H3Decoders(str(base), device=device, offload=low_vram)
-    with torch.inference_mode():
-        _progress("decode", 88, what="video")
-        pixels = decoders.decode_video(video)
-        _progress("decode", 93, what="audio")
-        wave = decoders.decode_audio(audio)
-    decode_peak = accelerator.max_memory_allocated()
-    if pixels.shape[:3] != (frames, height, width):
-        raise RuntimeError(f"decoded geometry mismatch: {pixels.shape}")
-    import numpy as np
-    if not np.isfinite(wave).all():
-        raise RuntimeError("decoded audio is not finite")
-    wave = wave[:, :round(frames / G.FPS * G.AUDIO_SAMPLE_RATE)]
+    decode_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
+                    "fp32": torch.float32}[getattr(args, "vae_decode_dtype", "fp16")]
+    decoders = H3Decoders(str(base), device=device, offload=low_vram, compute_dtype=decode_dtype)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    _progress("encode", 95, what="mp4")
-    write_mp4(str(args.output), pixels, audio=wave)
-    import av
-    with av.open(str(args.output)) as encoded:
-        stream = encoded.streams.video[0]
-        if (stream.width,stream.height) != (width,height) or not encoded.streams.audio:
-            raise RuntimeError("encoded video/audio validation failed")
-        audio_stream = encoded.streams.audio[0]
-        if stream.average_rate != G.FPS or audio_stream.codec_context.sample_rate != G.AUDIO_SAMPLE_RATE or audio_stream.codec_context.channels != 2:
-            raise RuntimeError("encoded frame rate or stereo audio format mismatch")
-        if sum(1 for _ in encoded.decode(video=0)) != frames:
-            raise RuntimeError("encoded frame count mismatch")
+    # The soundtrack is 0.56 GiB and decodes in a second; producing it first lets
+    # the video chunks be muxed as they come off the decoder.
+    _progress("decode", 87, what="audio")
+    with torch.inference_mode():
+        wave = decoders.decode_audio(audio) if tp_rank == 0 else None
+    _progress("decode", 88, what="video")
+
+    # Shard the clip by decoder chunk: every rank decodes a contiguous range and
+    # rank 0 writes, so TP no longer leaves the second NPU idle for this stage.
+    layout = decoders.chunk_layout(video.shape[0])
+    ranges = chunk_ranges(layout["chunks"], tp_world)
+    own_first, own_last = ranges[tp_rank]
+    decoded_frames = [0]
+
+    def decode_range():
+        for chunk in decoders.decode_video_chunks(video, first=own_first, last=own_last):
+            decoded_frames[0] += int(chunk.shape[0])
+            # Report within the 88-95 band: on TP both ranks advance together, so
+            # the log stays monotonic even though rank 0 also waits for peers.
+            done = decoded_frames[0]
+            _progress("decode", 88 + round(7 * min(1.0, done / max(1, layout["frames"]))),
+                      what="video", frames=done, total=layout["frames"])
+            yield chunk
+
+    def frames_for_writer():
+        """Rank 0: own range, then each higher rank's range as it arrives.
+
+        Frames travel chunk by chunk, so a peer only needs one decoded chunk in
+        flight and rank 0 can start encoding a peer's data before that rank has
+        finished its whole range. A zero-length header marks the end of a peer.
+        """
+        yield from decode_range()
+        for src in range(1, tp_world):
+            src_first, src_last = ranges[src]
+            if src_first >= src_last:
+                continue
+            while True:
+                header = torch.zeros(3, dtype=torch.int64, device=device)
+                dist.recv(header, src=src)
+                count, chunk_h, chunk_w = (int(value) for value in header.tolist())
+                if count == 0:
+                    break
+                staged = torch.empty((count, chunk_h, chunk_w, 3), dtype=torch.uint8, device=device)
+                dist.recv(staged, src=src)
+                block = staged.cpu().numpy()
+                del staged
+                accelerator.empty_cache()
+                decoded_frames[0] += int(block.shape[0])
+                yield block
+
+    if tp_rank == 0:
+        _progress("encode", 95, what="mp4")
+        # x264 (2.6 s at 480p, 11 s at 1080p) runs on a worker thread while the
+        # VAE decodes the next chunk; the file itself is byte-identical.
+        try:
+            written = write_mp4_chunks(str(args.output), frames_for_writer(), width=width, height=height,
+                                       audio=wave, overlap=True)
+        except BaseException:
+            # Peers block in send()/barrier() waiting for us; let them fail out
+            # instead of hanging until torchrun's watchdog kills the job.
+            if tp_world > 1:
+                for src in range(1, tp_world):
+                    if ranges[src][0] < ranges[src][1]:
+                        dist.send(torch.zeros(3, dtype=torch.int64, device=device), dst=src)
+            raise
+    else:
+        # Ship each decoded chunk as it is produced: at 1080p/10 s a chunk is
+        # ~0.12 GiB of uint8, so a peer never buffers its whole range.
+        for block in decode_range():
+            header = torch.tensor([block.shape[0], block.shape[1], block.shape[2]],
+                                  dtype=torch.int64, device=device)
+            dist.send(header, dst=0)
+            staged = torch.from_numpy(np.ascontiguousarray(block)).to(device)
+            dist.send(staged, dst=0)
+            del staged, block
+            accelerator.empty_cache()
+        dist.send(torch.zeros(3, dtype=torch.int64, device=device), dst=0)
+        written = 0
+    if tp_world > 1:
+        dist.barrier()
+    decode_peak = accelerator.max_memory_allocated()
+    if tp_rank == 0:
+        if written != frames or decoded_frames[0] != frames:
+            raise RuntimeError(f"decoded frame count mismatch: wrote {written}, decoded "
+                               f"{decoded_frames[0]}, expected {frames}")
+        if not np.isfinite(wave).all():
+            raise RuntimeError("decoded audio is not finite")
+        wave = wave[:, :round(frames / G.FPS * G.AUDIO_SAMPLE_RATE)]
+        import av
+        with av.open(str(args.output)) as encoded:
+            stream = encoded.streams.video[0]
+            if (stream.width, stream.height) != (width, height) or not encoded.streams.audio:
+                raise RuntimeError("encoded video/audio validation failed")
+            audio_stream = encoded.streams.audio[0]
+            if stream.average_rate != G.FPS or audio_stream.codec_context.sample_rate != G.AUDIO_SAMPLE_RATE or audio_stream.codec_context.channels != 2:
+                raise RuntimeError("encoded frame rate or stereo audio format mismatch")
+            if sum(1 for _ in encoded.decode(video=0)) != frames:
+                raise RuntimeError("encoded frame count mismatch")
     timings["decode_encode_seconds"] = time.monotonic() - start
+    if tp_rank != 0:
+        # Only rank 0 owns the artifacts; peers just release their decoder copy.
+        del decoders
+        gc.collect()
+        accelerator.empty_cache()
+        dist.barrier()
+        dist.destroy_process_group()
+        return
     metadata = {"task": args.task, "prompt": args.prompt, "seed": args.seed,
         "resolution": canvas["resolution"], "aspect": canvas["aspect"], "requested_seconds": args.duration,
         "canvas": {"width": width, "height": height, "num_frames": frames,
@@ -389,6 +468,10 @@ def generate(args):
         "decode_peak_allocated_bytes": decode_peak,
         "tensor_parallel_world_size": tp_world,
         "tensor_parallel_rank": tp_rank,
+        "vae_decode_dtype": getattr(args, "vae_decode_dtype", "fp16"),
+        "vae_decode_tile_batch": decoders.tile_batch,
+        "vae_decode_chunks": layout["chunks"],
+        "vae_decode_chunk_ranges": [list(item) for item in ranges],
         "tensor_parallel_shard_bytes": None if tp_report is None else tp_report["local_shard_bytes"],
         "tensor_parallel_fraction": None if tp_report is None else round(tp_report["per_rank_fraction"], 4),
         "torch":torch.__version__, "gpu":accelerator.device_name(),

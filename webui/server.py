@@ -66,6 +66,7 @@ MIN_CLIP_SECONDS = 2.0
 MAX_CLIP_SECONDS = 15.0
 MAX_TOTAL_CLIP_SECONDS = 15.0
 MAX_SEED = 2**63 - 1
+VAE_DECODE_DTYPES = ("fp16", "fp32", "bf16")
 
 ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 ALLOWED_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
@@ -118,6 +119,7 @@ class Submission:
     base_path: str
     adapter_path: str
     text_encoder_path: str
+    vae_decode_dtype: str = "fp16"
 
 
 @dataclass
@@ -131,6 +133,7 @@ class Task:
     low_vram: bool
     tensor_parallel: bool
     model: dict[str, str]
+    vae_decode_dtype: str = "fp16"
     input_files: list[str] = field(default_factory=list)
     status: str = "queued"
     stage: str = "queued"
@@ -164,6 +167,7 @@ class Task:
             "duration_seconds": self.plan.get("duration_seconds"),
             "seconds": self.plan.get("seconds"),
             "low_vram": self.low_vram, "tensor_parallel": self.tensor_parallel,
+            "vae_decode_dtype": self.vae_decode_dtype,
             "model": self.model, "input_files": self.input_files,
             "created_at": self.created_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "elapsed_seconds": round(elapsed, 2),
@@ -539,6 +543,9 @@ def validate_submission(fields: Mapping[str, list[str]], uploads: Mapping[str, l
     seed = _parse_seed(_one(fields, "seed", "") or None)
     low_vram = _parse_checkbox(fields, "low_vram", True)
     tensor_parallel = _parse_checkbox(fields, "tensor_parallel", False)
+    vae_decode_dtype = _one(fields, "vae_decode_dtype", "fp16").strip().lower() or "fp16"
+    if vae_decode_dtype not in VAE_DECODE_DTYPES:
+        raise SubmissionError(f"vae_decode_dtype 必须为 {' / '.join(VAE_DECODE_DTYPES)}")
     release = _load_release()
     model_repo = _one(fields, "model_repo", "Pika-Labs/Pika-H3-Flex").strip() or "Pika-Labs/Pika-H3-Flex"
     revision = _one(fields, "revision", str(release.get("model_revision", ""))).strip()
@@ -569,6 +576,7 @@ def validate_submission(fields: Mapping[str, list[str]], uploads: Mapping[str, l
         low_vram=low_vram, tensor_parallel=tensor_parallel, uploads=normalized_uploads,
         model_repo=model_repo, revision=revision, base_path=base_path,
         adapter_path=adapter_path, text_encoder_path=text_encoder_path,
+        vae_decode_dtype=vae_decode_dtype,
     )
     return submission, media
 
@@ -599,6 +607,8 @@ def build_command(task: Task, run_dir: Path) -> list[str]:
         cli_args.append("--low-vram")
     if task.tensor_parallel:
         cli_args += ["--tensor-parallel", "2"]
+    if task.vae_decode_dtype:
+        cli_args += ["--vae-decode-dtype", task.vae_decode_dtype]
     inputs = run_dir / "inputs"
     first = sorted(inputs.glob("first.*"))
     last = sorted(inputs.glob("last.*"))
@@ -688,6 +698,7 @@ class TaskManager:
                     plan=plan, seed=int(state.get("seed", 0)),
                     low_vram=bool(state.get("low_vram", True)),
                     tensor_parallel=bool(state.get("tensor_parallel", False)),
+                    vae_decode_dtype=str(state.get("vae_decode_dtype", "fp16")),
                     model=state.get("model") or {},
                     input_files=list(state.get("input_files") or []),
                     status=str(state.get("status", "error")),
@@ -802,6 +813,7 @@ class TaskManager:
                 id=task_id, mode=submission.mode, task=submission.task,
                 prompt=submission.prompt, plan=plan, seed=submission.seed,
                 low_vram=submission.low_vram, tensor_parallel=submission.tensor_parallel,
+                vae_decode_dtype=submission.vae_decode_dtype,
                 model={"repo": submission.model_repo, "revision": submission.revision,
                        "base_path": submission.base_path, "adapter_path": submission.adapter_path,
                        "text_encoder_path": submission.text_encoder_path},

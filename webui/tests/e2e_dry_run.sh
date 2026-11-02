@@ -42,14 +42,14 @@ echo
 echo "### 3. config + plan"
 curl -sS "$BASE/api/config" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); print("aspects:", len(d["aspects"]), "tiers:", list(d["tiers"]), "limits:", d["limits"]["images"], d["limits"]["videos"], d["limits"]["audio"], d["limits"]["total"])'
 curl -sS -X POST "$BASE/api/plan" -H 'Content-Type: application/json' \
-  -d '{"canvas_mode":"mp","mp":"1.0","aspect":"16:9","budget":"260"}' \
+  -d '{"canvas_mode":"mp","mp":"1.0","aspect":"16:9","duration":"5","budget":"260"}' \
   | "$PY" -c 'import json,sys; p=json.load(sys.stdin)["plan"]; print("plan:", "%dx%d" % (p["width"], p["height"]), p["frames"], "frames", p["seconds"], "s", "budget", p["budget_used"])'
 
 echo
 echo "### 4. submit task 1 (no seed: server draws one)"
 TASK1=$(curl -sS -X POST "$BASE/api/tasks" \
   -F 'mode=text' -F 'prompt=一只红色的球在木桌上弹跳，暖色午后光线。' \
-  -F 'canvas_mode=mp' -F 'mp=1.0' -F 'aspect=16:9' -F 'budget=260' \
+  -F 'canvas_mode=mp' -F 'mp=1.0' -F 'aspect=16:9' -F 'duration=5' -F 'budget=260' \
   -F 'low_vram=true' -F 'tensor_parallel=false')
 echo "$TASK1" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); print("202 id:", d["id"], "seed:", d["seed"], "canvas:", "%dx%d" % (d["plan"]["width"], d["plan"]["height"]), "frames:", d["plan"]["frames"])'
 ID1=$(echo "$TASK1" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -84,7 +84,7 @@ echo
 echo "### 7. seed: two consecutive submissions differ (random mode)"
 TASK2=$(curl -sS -X POST "$BASE/api/tasks" \
   -F 'mode=text' -F 'prompt=第二次随机种子测试' -F 'canvas_mode=mp' -F 'mp=0.4' \
-  -F 'aspect=9:16' -F 'budget=260' -F 'seed='"$($PY -c 'import os; print(int.from_bytes(os.urandom(8),"big") & (2**63-1))')")
+  -F 'aspect=9:16' -F 'duration=5' -F 'budget=260' -F 'seed='"$($PY -c 'import os; print(int.from_bytes(os.urandom(8),"big") & (2**63-1))')")
 SEED2=$(echo "$TASK2" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["seed"])')
 ID2=$(echo "$TASK2" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 echo "task1 seed: $SEED1"
@@ -96,8 +96,8 @@ curl -sS "$BASE/api/tasks/$ID2" | "$PY" -c 'import json,sys; d=json.load(sys.std
 echo
 echo "### 8. seed: fixed mode reuses the same seed"
 FIXED=123456789012345678
-TA=$(curl -sS -X POST "$BASE/api/tasks" -F 'mode=text' -F 'prompt=fixed A' -F 'canvas_mode=mp' -F 'mp=0.4' -F 'aspect=16:9' -F 'budget=260' -F "seed=$FIXED")
-TB=$(curl -sS -X POST "$BASE/api/tasks" -F 'mode=text' -F 'prompt=fixed B' -F 'canvas_mode=mp' -F 'mp=0.4' -F 'aspect=16:9' -F 'budget=260' -F "seed=$FIXED")
+TA=$(curl -sS -X POST "$BASE/api/tasks" -F 'mode=text' -F 'prompt=fixed A' -F 'canvas_mode=mp' -F 'mp=0.4' -F 'aspect=16:9' -F 'duration=5' -F 'budget=260' -F "seed=$FIXED")
+TB=$(curl -sS -X POST "$BASE/api/tasks" -F 'mode=text' -F 'prompt=fixed B' -F 'canvas_mode=mp' -F 'mp=0.4' -F 'aspect=16:9' -F 'duration=5' -F 'budget=260' -F "seed=$FIXED")
 SA=$(echo "$TA" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["seed"])')
 SB=$(echo "$TB" | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["seed"])')
 echo "fixed submission A seed: $SA"

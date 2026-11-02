@@ -938,6 +938,7 @@
     for (const [key, value] of Object.entries(planFields())) body.set(key, value);
     body.set("low_vram", $("low-vram").checked ? "true" : "false");
     body.set("tensor_parallel", $("tensor-parallel").checked ? "true" : "false");
+    body.set("vae_decode_dtype", $("vae-decode-dtype").value);
     body.set("base_path", $("base-path").value.trim());
     body.set("adapter_path", $("adapter-path").value.trim());
     body.set("model_repo", $("model-repo").value.trim());
