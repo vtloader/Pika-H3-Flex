@@ -192,7 +192,7 @@ def generate(args):
     from PIL import Image
     from .core.conditioning import H3ConditionEncoder, Reference
     from .core.loader import build_transformer, apply_lora, load_lora_weights
-    from .core.fused_ops import fuse_rmsnorm_modules
+    from .core.fused_ops import fuse_attention_norms, fuse_rmsnorm_modules
     from .core.numerics import prepare_conditioning, configure_numerics_backend
     from .core.schedules import H3SigmaSchedule
     from .core.evaluation import sample_evaluation_ladder
@@ -273,11 +273,20 @@ def generate(args):
     apply_lora(model, rank=manifest["rank"], alpha=manifest["alpha"], target_modules=manifest.get("target_modules"), master_dtype=torch.bfloat16)
     load_lora_weights(model, str(adapter))
     model.requires_grad_(False).eval()
-    # Opt-in only: the fused kernel is numerically equivalent to ATen within bf16
-    # rounding (0.2 % per block, i.e. below one ulp), but a 1-ulp difference per
-    # block is amplified by six-step consistency sampling into a visibly different
-    # video at the same seed. The released contract is bit-exact output, so the
-    # fusion is off unless explicitly requested.
+    # Two fusions, two different correctness contracts:
+    #
+    # * `fuse_attention_norms` is **bit-exact** (verified with torch.equal on
+    #   random and real Q/K) and therefore always on. It fuses only the per-head
+    #   QK norms, which run over head_dim=128 where the fused kernel happens to
+    #   match ATen exactly, and it is 24x faster there.
+    # * `fuse_rmsnorm_modules` rewrites every RMSNorm, including the 5376-channel
+    #   hidden-size ones. Those are equivalent only within bf16 rounding
+    #   (0.2 % per block, i.e. below one ulp), and six-step consistency sampling
+    #   amplifies a 1-ulp difference into a visibly different video at the same
+    #   seed. The released contract is bit-exact output, so this stays opt-in.
+    #
+    # `PIKA_QK_NORM=0` disables the exact fusion for A/B measurement only.
+    fused_qk_norms = 0 if os.environ.get("PIKA_QK_NORM", "1") == "0" else fuse_attention_norms(model)
     fused_norms = fuse_rmsnorm_modules(model) if os.environ.get("PIKA_FUSED_RMSNORM", "0") == "1" else 0
     tp_report = None
     if tp_world > 1:
@@ -463,6 +472,7 @@ def generate(args):
         "bucket_sha256": file_sha256(BUCKET_FILE), "noise_version": "pika-flex-noise-v1",
         "numerics_policy":policy, "sampling":manifest["sampling"],
         "fused_rmsnorm_modules": fused_norms,
+        "fused_attention_norms": fused_qk_norms,
         "timings":timings, "sampling_peak_allocated_bytes":peak,
         "conditioning_peak_allocated_bytes": conditioning_peak,
         "decode_peak_allocated_bytes": decode_peak,

@@ -640,5 +640,62 @@ class VaeDecodeTests(unittest.TestCase):
             self.assertEqual(one.read_bytes(), threaded.read_bytes())
 
 
+class FusedAttentionNormTests(unittest.TestCase):
+    """The QK-norm fusion must only touch per-head norms, and be a no-op off NPU."""
+
+    @staticmethod
+    def _make_model():
+        import torch
+
+        class Attn(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.heads = 56
+                self.head_dim = 128
+                self.norm_q = torch.nn.RMSNorm(128, eps=1e-5)
+                self.norm_k = torch.nn.RMSNorm(128, eps=1e-5)
+
+        class Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.norm = torch.nn.RMSNorm(5376, eps=1e-5)
+                self.attn = Attn()
+
+        return Block()
+
+    def test_off_npu_is_a_noop(self) -> None:
+        from pika_h3.core import fused_ops
+
+        model = self._make_model()
+        if fused_ops.accelerator.backend() == "npu":
+            self.skipTest("this check is about the non-NPU fallback")
+        self.assertEqual(fused_ops.fuse_attention_norms(model), 0)
+        self.assertIs(type(model.attn.norm_q), __import__("torch").nn.RMSNorm)
+
+    def test_only_head_sized_norms_are_swapped(self) -> None:
+        import torch
+
+        from pika_h3.core import fused_ops
+
+        if fused_ops.accelerator.backend() != "npu":
+            self.skipTest("fused kernels need the NPU backend")
+        model = self._make_model()
+        self.assertEqual(fused_ops.fuse_attention_norms(model), 2)
+        self.assertIs(type(model.attn.norm_q), fused_ops.FusedRMSNorm)
+        self.assertIs(type(model.attn.norm_k), fused_ops.FusedRMSNorm)
+        # The full-width hidden norm is not bit-exact under this kernel and must
+        # stay on the ATen path (it is handled by the opt-in fuse_rmsnorm_modules).
+        self.assertIs(type(model.norm), torch.nn.RMSNorm)
+
+    def test_idempotent(self) -> None:
+        from pika_h3.core import fused_ops
+
+        if fused_ops.accelerator.backend() != "npu":
+            self.skipTest("fused kernels need the NPU backend")
+        model = self._make_model()
+        self.assertEqual(fused_ops.fuse_attention_norms(model), 2)
+        self.assertEqual(fused_ops.fuse_attention_norms(model), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

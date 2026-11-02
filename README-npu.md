@@ -69,7 +69,51 @@ pageable 内存）。480p/5s `t2va`，msprof task 时间线 + npu-smi 1 Hz：
 一次性投入、6 步内即回本。768p 实测采样 181.3 s → **138.8 s**（−23 %），
 采样峰值 11.33 → 12.56 GiB。详见 [docs/npu-denoise-utilization.md](docs/npu-denoise-utilization.md)。
 
-`PIKA_FUSED_RMSNORM=1` 可再快 9.8 %（融合 RMSNorm），但会破坏逐位一致，默认关闭。
+`PIKA_FUSED_RMSNORM=1` 可再快 9.8 %（融合全部 RMSNorm），但会破坏逐位一致，默认关闭。
+
+### Attention 附近的无损融合（2026-11-02）
+
+attention 内核本身**没有余量**了。同一颗 NPU 上 bf16 matmul 能到 323 TFLOPS，
+而 `FlashAttentionScore` 恒定在 **159–160 TFLOPS**，且与 head 数（8–96）、序列长度
+（2k–37k）、`inner_precise`、fp16/bf16 全都无关；把 heads 拆成 2/4 组、放到两条
+NPU stream 上并发也是 1.00×。这个缺口来自 D=128 时 kernel 内部的 softmax 流水线
+（cube 占用率已达 98 %），换任何 CANN 入口都补不上：`npu_fusion_attention` 慢 30 %，
+`npu_prompt_flash_attention` 慢 3 %。作为对照，K=128 的纯 matmul 只有 52.7 TFLOPS，
+FA 已经是它的 3 倍。
+
+能动的只有 attention 周围。逐位验证后采用了一处融合：
+
+| 改动 | 单次 | 加速 | 逐位一致 |
+| --- | ---: | ---: | --- |
+| per-head QK RMSNorm → `torch_npu.npu_rms_norm` | 23.4 → 0.96 ms | **24.4×** | ✅ max\|d\|=0 |
+
+QK norm 在 `head_dim=128` 上归一化，这个宽度下 `npu_rms_norm` 与 ATen **逐位相同**
+（24 组随机 bf16 + 真实 Q/K 全部 `torch.equal`；50 层完整前向
+`nonzero=0/202,368,768`）。和它相反，5376 通道的 hidden-size norm 只在 bf16 舍入内
+等价，所以仍归 `PIKA_FUSED_RMSNORM` 管、默认关闭。
+
+端到端 1344×768 / 5 s / seed 42，同一台机器、同一天、背靠背跑：
+
+| | 采样 | 端到端 | mp4 md5 |
+| --- | ---: | ---: | --- |
+| 单卡 关闭（`PIKA_QK_NORM=0`） | 138.67 s | 212.19 s | `fd97e3c1…` |
+| 单卡 开启（默认） | **134.66 s**（−2.9 %） | **183.75 s** | `fd97e3c1…`（**相同**） |
+| TP2 关闭 | 83.11 s | 128.80 s | `e8a626d5…` |
+| TP2 开启（默认） | **78.99 s**（−5.0 %） | 133.26 s | `e8a626d5…`（**相同**） |
+
+两种并行度下产物都逐位相同（逐像素 max diff 0）。TP2 的收益更大（−5.0 % vs
+−2.9 %）：每张卡只算 28 个 head，5 个小 kernel 的启动开销在更小的算子上占比更高。
+
+> TP2 与单卡的 md5 本来就不同（`e8a626d5…` vs `fd97e3c1…`）：all_reduce 改变了
+> 归约顺序，这是既有行为，与本次改动无关。要验证无损，必须比同一种并行度下的开/关。
+
+输出 JSON 新增 `fused_attention_norms` 记录融合了多少个模块（50 层 × 2 = 104）。
+
+试过但**放弃**的（都不满足无损，或反而更慢）：RoPE 融合（`npu_rotary_mul` 需要
+D∈{64,128}，模型的 rotary_dim 是 96，permute 后差 1 ulp 且慢 1.8×）、
+SwiGLU 融合（`npu_swiglu` 的 value/gate 顺序与 diffusers 相反，swap 后仍差
+0.0625）、`addcmul` 合并残差与门控（差 0.125）、双流拆 head（1.00×）。
+完整的测量与复现脚本见 [docs/npu-attention-fusion.md](docs/npu-attention-fusion.md)。
 
 采样阶段的满载率与空闲归因（msprof + probe 实测）见
 [docs/npu-sampling-idle-profile.md](docs/npu-sampling-idle-profile.md)：稳态 kernel

@@ -71,8 +71,59 @@ def _convert(module: torch.nn.Module) -> int:
     return swapped
 
 
+def fuse_attention_norms(model: torch.nn.Module) -> int:
+    """Swap the per-head QK norms for the fused Ascend kernel.
+
+    Unlike :func:`fuse_rmsnorm_modules` this is **bit-exact** and therefore
+    always on.  The QK norms normalise over ``head_dim`` (128 channels), and on
+    that width ``npu_rms_norm`` reproduces ATen to the bit: verified over 24
+    random bf16 tensors and on the real Q/K of a forward pass (``torch.equal``
+    true in every case, max |diff| 0).
+
+    Why the narrower norm can be fused but the full-width one cannot: ATen
+    decomposes RMSNorm into five AIV kernels (``Pows``, ``ReduceMean``,
+    ``Muls``, ``Rsqrt``, ``Mul``), and on 128 channels those launches dominate.
+    ``npu_rms_norm`` does the same arithmetic in one kernel, 24x faster
+    (23.4 ms -> 0.96 ms per call at 37643 rows x 56 heads x 128).  The
+    full-width 5376-channel norm is a different case: there the two
+    implementations accumulate in a different order and differ by up to one
+    bf16 ulp, which six-step sampling amplifies -- see
+    :func:`fuse_rmsnorm_modules`.
+
+    Only modules that own a ``norm_q``/``norm_k`` pair whose ``normalized_shape``
+    matches ``head_dim`` are touched, so this cannot reach the VAE or the text
+    encoder.  Returns the number of swapped modules (0 off NPU).
+    """
+    if accelerator.backend() != "npu":
+        return 0
+    try:
+        import torch_npu  # noqa: F401
+    except Exception:
+        return 0
+
+    swapped = 0
+    for module in model.modules():
+        head_dim = getattr(module, "head_dim", None)
+        if not head_dim:
+            continue
+        for attr in ("norm_q", "norm_k"):
+            norm = getattr(module, attr, None)
+            if type(norm) is not torch.nn.RMSNorm:
+                continue
+            shape = tuple(norm.normalized_shape)
+            if shape != (int(head_dim),):
+                continue
+            setattr(module, attr, FusedRMSNorm(shape, norm.eps, norm.weight))
+            swapped += 1
+    return swapped
+
+
 def fuse_rmsnorm_modules(model: torch.nn.Module) -> int:
     """Replace every ``nn.RMSNorm`` under ``model`` with :class:`FusedRMSNorm`.
+
+    Opt-in (``PIKA_FUSED_RMSNORM=1``) because the full-width hidden-size norm is
+    *not* bit-exact: see the module docstring.  Use
+    :func:`fuse_attention_norms` for the exact part.
 
     Returns the number of swapped modules (0 when the backend cannot fuse).
     """
