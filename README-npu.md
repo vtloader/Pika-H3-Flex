@@ -1,16 +1,20 @@
 # NPU (Ascend) 环境说明
 
 本机为 Ascend 910（aarch64，CANN 9.0.0，2 卡 × 61.27 GiB HBM）。项目上游默认面向
-NVIDIA CUDA，这里的 `.venv312` 已完成 NPU 适配，并且**五种任务全部端到端验证通过**。
+NVIDIA CUDA，这里的 `.venv312` 已完成 NPU 适配；2.14 环境下五种任务全部端到端验证通过，
+当前 2.10 环境已复测 t2va。
 
 | 项 | 版本 |
 | --- | --- |
 | Python | 3.12.16（deadsnakes PPA） |
-| torch | 2.14.0+cpu（PyTorch 官方 CPU 源） |
-| torch_npu | 2.14.0 |
-| torchvision | 0.29.2+cpu（**必需**，见下文） |
+| torch | 2.10.0+cpu（PyTorch CPU 源 / 上交镜像） |
+| torch_npu | 2.10.0 |
+| torchvision | 0.25.0+cpu（**必需**，见下文） |
 | CANN | 9.0.0 |
 | 其余依赖 | 与 `requirements.txt` 完全一致 |
+
+> 2026-11-06 已将设备栈降级为 torch 2.10.0+cpu / torch_npu 2.10.0 /
+> torchvision 0.25.0+cpu；t2va 480p/5 s 与 768p/5 s 均已端到端复测通过（NPU 2 卡可用）。
 
 ## 快速使用
 
@@ -462,7 +466,8 @@ printf '[global]\nindex-url = https://mirrors.cloud.tencent.com/pypi/simple\ntim
 
 ### 3. torch / torch_npu / torchvision（关键）
 
-**必须使用 PyTorch 官方 CPU 源**。PyPI 上 `torch==2.14.0` 是 CUDA 13 构建，
+**必须使用 PyTorch CPU 源**（国内推荐上海交大镜像
+`https://mirror.sjtu.edu.cn/pytorch-wheels/cpu`）。PyPI 上 `torch==2.10.0` 是 CUDA 构建，
 与 `torch_npu` 同时加载会因 allocator 配置键重复而直接 abort：
 
 ```
@@ -471,9 +476,9 @@ ValueError: Duplicated key 'pinned_reserve_segment_size_mb'
 
 ```bash
 source .venv312/bin/activate
-pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.14.0+cpu"
-pip install --no-deps "torch_npu==2.14.0"
-pip install --no-deps --index-url https://download.pytorch.org/whl/cpu "torchvision==0.29.2+cpu"
+pip install --no-deps --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cpu "torch==2.10.0+cpu"
+pip install --no-deps "torch_npu==2.10.0"
+pip install --no-deps --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cpu "torchvision==0.25.0+cpu"
 ```
 
 两个 `--no-deps` 都不可省略：否则依赖解析会把 PyPI 的 CUDA 版 torch 拉回来。
@@ -589,16 +594,17 @@ PY
 
 ## 已知注意事项
 
-1. **启动告警**：torch_npu 2.14 打印
+1. **日志噪声**：torch_npu 2.10 可能打印
+   `Cannot create tensor with interal format ...`（上游拼写如此）或
    `Warning: the current CANN and Soc versions require processing for 32 padding size`，
    以及 transformers 关于 `min_frames`/`max_frames` 未写入 docstring 的 ERROR 日志，
    均为上游日志噪声，不影响功能。
-2. **CANN 版本**：torch_npu 2.14 的部分新特性（如 `FORCE_OVERFLOW_CHECK`）要求
-   CANN 9.1.0+；当前 9.0.0 下不可用，主流程不受影响。
+2. **CANN 版本**：torch_npu 2.10 + CANN 9.0.0 已实测 t2va 480p/5 s 与 768p/5 s
+   全流程通过；若启用更高 CANN 版本独有的新特性，请以华为兼容矩阵为准。
 3. **CPU 往返开销**：`--low-vram` 下文本编码条件耗时明显高于纯 GPU 实现
    （t2va 19.5 s，i2va 68.3 s，主因是视频 VAE 在 CPU/NPU 间搬运），属于预期代价。
-4. **torch 2.14 vs 上游 2.13**：数值行为可能与官方 H100 结果有细微差异；
+4. **torch 2.10 vs 原上游 2.13**：数值行为可能与官方 H100 结果有细微差异；
    同 seed 在 NPU 上可复现。
-5. **仅验证 480p / 5 s**：768p 与 15 s 未实测，显存有余量但耗时更长。
+5. **已验证 480p / 768p 5 s**：15 s 未实测，显存有余量但耗时更长。
 6. **pip 镜像**：系统 `/etc/pip.conf` 指向清华源，当前返回 403。`.venv312` 已写入
    腾讯云镜像配置（`pip.conf`），venv 内装包无需额外指定 `-i`。

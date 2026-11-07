@@ -1,7 +1,7 @@
 # Ascend NPU 推理环境（本机已验证）
 #
-# 安装顺序不能颠倒，torch 必须来自 PyTorch 官方 CPU 源：
-#   PyPI 上的 torch==2.14.0 是 CUDA 构建，和 torch_npu 同时加载会直接 abort：
+# 安装顺序不能颠倒，torch 必须来自 PyTorch CPU 源（国内走上海交大镜像）：
+#   PyPI 上的 torch==2.10.0 是 CUDA 构建，和 torch_npu 同时加载会直接 abort：
 #   ValueError: Duplicated key 'pinned_reserve_segment_size_mb'
 #
 #   python -m pip install -r requirements.txt
@@ -13,12 +13,12 @@
 # "Qwen3VLVideoProcessor requires the Torchvision library"。
 
 --index-url https://mirrors.cloud.tencent.com/pypi/simple
---extra-index-url https://download.pytorch.org/whl/cpu
+--extra-index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cpu
 
 # --- 设备栈（必须 CPU 构建的 torch）---
-torch==2.14.0+cpu
-torchvision==0.29.2+cpu
-torch_npu==2.14.0
+torch==2.10.0+cpu
+torchvision==0.25.0+cpu
+torch_npu==2.10.0
 
 # --- 模型运行时 ---
 transformers==5.15.0
